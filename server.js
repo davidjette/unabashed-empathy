@@ -77,17 +77,100 @@ app.get('/api/v1/research/stats/zip/:zipCode', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM housing_stats WHERE zip_code = $1', [zipCode]);
     if (result.rows.length === 0) {
+      // Look up this ZIP in the HUD USPS crosswalk for county-level fallback
+      const hudResult = await pool.query(
+        `SELECT county_fips, pref_city, state_abbr, res_ratio
+         FROM hud_zip_county WHERE zip_code = $1
+         ORDER BY tot_ratio DESC LIMIT 1`,
+        [zipCode]
+      );
+
+      if (hudResult.rows.length > 0) {
+        const hud = hudResult.rows[0];
+        const countyFips = hud.county_fips;
+
+        // Get all residential ZIPs in that county, then aggregate housing data
+        const countyZips = await pool.query(
+          `SELECT zip_code FROM hud_zip_county WHERE county_fips = $1 AND res_ratio > 0`,
+          [countyFips]
+        );
+        const zipList = countyZips.rows.map(r => r.zip_code);
+
+        let countyData = null;
+        if (zipList.length > 0) {
+          const placeholders = zipList.map((_, i) => `$${i + 1}`).join(', ');
+          const agg = await pool.query(
+            `SELECT
+               COUNT(DISTINCT zip_code) as zip_count,
+               AVG(homeownership_rate) as avg_homeownership,
+               AVG(median_home_price) as avg_home_price,
+               AVG(median_rent) as avg_rent,
+               AVG(median_household_income) as avg_income,
+               AVG(median_age) as avg_age,
+               AVG(vacancy_rate) as avg_vacancy,
+               SUM(population) as total_population,
+               MAX(county_name) as county_name,
+               MAX(state_name) as state_name,
+               MAX(state_abbr) as state_abbr
+             FROM housing_stats
+             WHERE zip_code IN (${placeholders})
+               AND homeownership_rate IS NOT NULL`,
+            zipList
+          );
+          if (agg.rows[0].zip_count > 0) {
+            countyData = agg.rows[0];
+          }
+        }
+
+        const classification = classifyMissingZip(zipCode);
+        const isNonResidential = hud.res_ratio === '0.000000000' || parseFloat(hud.res_ratio) === 0;
+
+        return res.status(200).json({
+          success: true,
+          zip_code: zipCode,
+          zip_type: isNonResidential ? (classification.zip_type === 'military' ? 'military' : 'non_residential') : 'residential_no_census',
+          note: isNonResidential
+            ? `ZIP ${zipCode} (${hud.pref_city}, ${hud.state_abbr}) has no residential addresses — showing ${countyData?.county_name || 'county'} county-level data instead.`
+            : `ZIP ${zipCode} (${hud.pref_city}, ${hud.state_abbr}) exists but has no Census ZCTA data — showing ${countyData?.county_name || 'county'} county-level data instead.`,
+          requested_zip: {
+            zip_code: zipCode,
+            pref_city: hud.pref_city,
+            state_abbr: hud.state_abbr,
+            county_fips: countyFips,
+            res_ratio: parseFloat(hud.res_ratio),
+          },
+          county_data: countyData ? {
+            county_name: countyData.county_name,
+            state_name: countyData.state_name,
+            state_abbr: countyData.state_abbr,
+            county_fips: countyFips,
+            zips_in_county: parseInt(countyData.zip_count),
+            total_population: countyData.total_population ? parseInt(countyData.total_population) : null,
+            avg_homeownership_rate: countyData.avg_homeownership ? parseFloat(parseFloat(countyData.avg_homeownership).toFixed(2)) : null,
+            avg_median_home_price: countyData.avg_home_price ? Math.round(parseFloat(countyData.avg_home_price)) : null,
+            avg_median_rent: countyData.avg_rent ? Math.round(parseFloat(countyData.avg_rent)) : null,
+            avg_median_household_income: countyData.avg_income ? Math.round(parseFloat(countyData.avg_income)) : null,
+            avg_median_age: countyData.avg_age ? parseFloat(parseFloat(countyData.avg_age).toFixed(1)) : null,
+            avg_vacancy_rate: countyData.avg_vacancy ? parseFloat(parseFloat(countyData.avg_vacancy).toFixed(2)) : null,
+            data_source: 'Census ACS 5-Year 2023 (aggregated from residential ZIPs in county)',
+          } : null,
+          meta: {
+            timestamp: new Date().toISOString(),
+            query_time_ms: Date.now() - start,
+            hud_crosswalk: 'Q4 2025',
+          },
+        });
+      }
+
+      // Not in HUD crosswalk either — truly unknown ZIP
       const classification = classifyMissingZip(zipCode);
       return res.status(404).json({
         success: false,
-        error: `No residential housing data available for ZIP code ${zipCode}`,
+        error: `No data found for ZIP code ${zipCode}`,
         zip_code: zipCode,
         ...classification,
         code: 404,
-        data_sources_checked: ['Census ACS 5-Year 2023 (33,181 ZCTAs)'],
-        // HUD USPS Crosswalk API could identify this ZIP's county for county-level fallback.
-        // Requires HUD API token: https://www.huduser.gov/apps/public/uspscrosswalk/register
-        hud_fallback_available: false,
+        data_sources_checked: ['Census ACS 5-Year 2023 (33,181 ZCTAs)', 'HUD USPS Crosswalk Q4 2025 (39,494 ZIPs)'],
       });
     }
     
