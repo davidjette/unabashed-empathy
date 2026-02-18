@@ -224,16 +224,6 @@ compareBtn.addEventListener('click', async () => {
   if (compareZips.length < 2) return;
   
   try {
-    const data = await fetchAPI('/api/v1/research/compare', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ zip_codes: compareZips }),
-    });
-    // Fallback: use direct fetch for POST
-  } catch (e) {}
-  
-  // Use direct fetch for POST
-  try {
     const res = await fetch(API_BASE + '/api/v1/research/compare', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -265,6 +255,14 @@ function removeCompare(idx) {
 function renderCompareTable(rows) {
   const section = document.getElementById('compareSection');
   const table = document.getElementById('compareTable');
+  
+  // Deduplicate by zip_code (take first occurrence)
+  const seen = new Set();
+  rows = rows.filter(r => {
+    if (seen.has(r.zip_code)) return false;
+    seen.add(r.zip_code);
+    return true;
+  });
   
   const metrics = [
     { key: 'homeownership_rate', label: 'Homeownership %', fmt: fmt.pct },
