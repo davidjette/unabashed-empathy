@@ -16,12 +16,23 @@
       </div>
       
       <div class="search-section">
-        <label class="search-label">Search ZIP Code</label>
+        <label class="search-label">Search</label>
         <div class="search-box">
-          <input type="text" id="searchInput" placeholder="Enter ZIP code (e.g. 78701)" maxlength="5" autocomplete="off">
+          <input type="text" id="searchInput" placeholder="ZIP, city, county, or state..." autocomplete="off">
           <button id="searchBtn" class="search-btn">Search</button>
         </div>
         <div id="searchResults" class="search-results hidden"></div>
+      </div>
+      
+      <div class="browse-section">
+        <label class="search-label">Browse by State</label>
+        <select id="stateSelect" class="state-select">
+          <option value="">Select a state...</option>
+        </select>
+        <select id="countySelect" class="state-select hidden">
+          <option value="">Select a county...</option>
+        </select>
+        <div id="browseZips" class="browse-zips hidden"></div>
       </div>
       
       <div class="compare-section">
@@ -47,7 +58,7 @@
         </div>
         <div class="data-badge">
           <span class="dot"></span>
-          66,362 ZIP codes · Census ACS 2023
+          33,181 ZIP codes · Census ACS 2023
         </div>
       </header>
       

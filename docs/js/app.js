@@ -1,8 +1,9 @@
 /**
  * Homium Housing Research Dashboard — Frontend
+ * v2: ZIP search + state/county browsing
  */
 
-// API base URL — change for production
+// API base URL
 const API_BASE = window.location.hostname === 'localhost' 
   ? 'http://localhost:3000' 
   : 'https://unabashed-empathy.onrender.com';
@@ -10,6 +11,19 @@ const API_BASE = window.location.hostname === 'localhost'
 // State
 let currentData = null;
 let compareZips = [];
+let currentView = 'zip'; // 'zip' | 'state' | 'county'
+
+// State name lookup
+const STATE_NAMES = {
+  AL:'Alabama',AK:'Alaska',AZ:'Arizona',AR:'Arkansas',CA:'California',CO:'Colorado',CT:'Connecticut',
+  DE:'Delaware',DC:'District of Columbia',FL:'Florida',GA:'Georgia',HI:'Hawaii',ID:'Idaho',IL:'Illinois',
+  IN:'Indiana',IA:'Iowa',KS:'Kansas',KY:'Kentucky',LA:'Louisiana',ME:'Maine',MD:'Maryland',MA:'Massachusetts',
+  MI:'Michigan',MN:'Minnesota',MS:'Mississippi',MO:'Missouri',MT:'Montana',NE:'Nebraska',NV:'Nevada',
+  NH:'New Hampshire',NJ:'New Jersey',NM:'New Mexico',NY:'New York',NC:'North Carolina',ND:'North Dakota',
+  OH:'Ohio',OK:'Oklahoma',OR:'Oregon',PA:'Pennsylvania',PR:'Puerto Rico',RI:'Rhode Island',SC:'South Carolina',
+  SD:'South Dakota',TN:'Tennessee',TX:'Texas',UT:'Utah',VT:'Vermont',VA:'Virginia',WA:'Washington',
+  WV:'West Virginia',WI:'Wisconsin',WY:'Wyoming'
+};
 
 // ── DOM Elements ──
 const searchInput = document.getElementById('searchInput');
@@ -24,6 +38,9 @@ const addCompareBtn = document.getElementById('addCompareBtn');
 const compareBtn = document.getElementById('compareBtn');
 const exportCsvBtn = document.getElementById('exportCsvBtn');
 const qualityBtn = document.getElementById('qualityBtn');
+const stateSelect = document.getElementById('stateSelect');
+const countySelect = document.getElementById('countySelect');
+const browseZips = document.getElementById('browseZips');
 
 // ── Formatters ──
 const fmt = {
@@ -57,6 +74,11 @@ searchBtn.addEventListener('click', () => doSearch());
 searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 searchInput.addEventListener('input', debounce(doAutocomplete, 300));
 
+// Close search results on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.search-section')) searchResults.classList.add('hidden');
+});
+
 async function doSearch() {
   const q = searchInput.value.trim();
   if (!q) return;
@@ -64,7 +86,7 @@ async function doSearch() {
   
   if (/^\d{5}$/.test(q)) {
     await loadZip(q);
-  } else if (/^\d{1,4}$/.test(q)) {
+  } else if (q.length >= 2) {
     await doAutocomplete();
   }
 }
@@ -74,14 +96,14 @@ async function doAutocomplete() {
   if (q.length < 2) { searchResults.classList.add('hidden'); return; }
   
   try {
-    const data = await fetchAPI(`/api/v1/research/search?q=${encodeURIComponent(q)}&limit=10`);
+    const data = await fetchAPI(`/api/v1/research/search?q=${encodeURIComponent(q)}&limit=15`);
     if (data.data.length === 0) {
       searchResults.innerHTML = '<div class="search-result-item"><span class="meta">No results</span></div>';
     } else {
       searchResults.innerHTML = data.data.map(r => `
         <div class="search-result-item" onclick="loadZip('${r.zip_code}')">
           <span class="zip">${r.zip_code}</span>
-          <span class="meta">${[r.county_name, r.state_abbr].filter(Boolean).join(', ') || 'US'} · Pop ${fmt.compact(r.population)}</span>
+          <span class="meta">${[r.county_name, r.state_abbr, r.metro_area].filter(Boolean).join(', ') || 'US'} · Pop ${fmt.compact(r.population)}</span>
         </div>
       `).join('');
     }
@@ -95,8 +117,8 @@ async function doAutocomplete() {
 async function loadZip(zipCode) {
   searchResults.classList.add('hidden');
   searchInput.value = zipCode;
+  currentView = 'zip';
   
-  // Show loading
   statsGrid.querySelectorAll('.stat-value').forEach(el => {
     el.innerHTML = '<span class="loading"></span>';
   });
@@ -104,14 +126,26 @@ async function loadZip(zipCode) {
   try {
     const data = await fetchAPI(`/api/v1/research/stats/zip/${zipCode}`);
     currentData = data.data;
-    renderStats(data.data);
+    renderZipStats(data.data);
     renderComparison(data.data);
     renderRedfin(data.data);
     
-    // Update title
     const location = [data.data.county_name, data.data.state_abbr].filter(Boolean).join(', ');
     mainTitle.textContent = `ZIP ${zipCode}` + (location ? ` — ${location}` : '');
-    mainSubtitle.textContent = [data.data.metro_area, `Pop. ${fmt.num(data.data.population)}`].filter(Boolean).join(' · ');
+    
+    const parts = [];
+    if (data.data.metro_area) parts.push(data.data.metro_area);
+    if (data.data.population) parts.push(`Pop. ${fmt.num(data.data.population)}`);
+    
+    // Add breadcrumb links
+    const crumbs = [];
+    if (data.data.state_abbr) crumbs.push(`<a onclick="loadState('${data.data.state_abbr}')">${STATE_NAMES[data.data.state_abbr] || data.data.state_abbr}</a>`);
+    if (data.data.county_name && data.data.state_abbr) crumbs.push(`<a onclick="loadCounty('${encodeURIComponent(data.data.county_name)}', '${data.data.state_abbr}')">${data.data.county_name}</a>`);
+    
+    mainSubtitle.innerHTML = (crumbs.length ? crumbs.join(' › ') + ' · ' : '') + parts.join(' · ');
+    
+    // Show detail grid, hide county ZIP list
+    detailGrid.classList.remove('hidden');
     
   } catch (e) {
     mainTitle.textContent = 'ZIP Not Found';
@@ -119,8 +153,88 @@ async function loadZip(zipCode) {
   }
 }
 
-// ── Render Stats Cards ──
-function renderStats(d) {
+// ── Load State View ──
+async function loadState(stateAbbr) {
+  currentView = 'state';
+  searchResults.classList.add('hidden');
+  
+  // Update sidebar select
+  stateSelect.value = stateAbbr;
+  
+  statsGrid.innerHTML = Array(4).fill('<div class="stat-card"><div class="stat-label">&nbsp;</div><div class="stat-value"><span class="loading"></span></div></div>').join('');
+  
+  try {
+    const data = await fetchAPI(`/api/v1/research/stats/state/${stateAbbr}`);
+    const d = data.data;
+    
+    mainTitle.textContent = STATE_NAMES[stateAbbr] || stateAbbr;
+    mainSubtitle.innerHTML = `${fmt.num(d.zip_count)} ZIP codes · Pop. ${fmt.compact(d.total_population)}`;
+    
+    renderAggregateStats(d);
+    
+    // Hide ZIP-specific sections
+    detailGrid.classList.add('hidden');
+    document.getElementById('redfinSection').classList.add('hidden');
+    document.getElementById('comparisonSection').classList.add('hidden');
+    
+    // Load counties
+    await loadCountyList(stateAbbr);
+    
+  } catch (e) {
+    mainTitle.textContent = 'State Not Found';
+    mainSubtitle.textContent = '';
+  }
+}
+
+// ── Load County View ──
+async function loadCounty(countyName, stateAbbr) {
+  currentView = 'county';
+  searchResults.classList.add('hidden');
+  
+  statsGrid.innerHTML = Array(4).fill('<div class="stat-card"><div class="stat-label">&nbsp;</div><div class="stat-value"><span class="loading"></span></div></div>').join('');
+  
+  try {
+    const data = await fetchAPI(`/api/v1/research/stats/county/${countyName}?state=${stateAbbr}`);
+    const d = data.data;
+    
+    mainTitle.textContent = `${decodeURIComponent(d.county_name)}, ${d.state_abbr}`;
+    mainSubtitle.innerHTML = `<a onclick="loadState('${stateAbbr}')">${STATE_NAMES[stateAbbr] || stateAbbr}</a> › ${decodeURIComponent(d.county_name)} · ${fmt.num(d.zip_count)} ZIPs · Pop. ${fmt.compact(d.total_population)}`;
+    
+    renderAggregateStats(d);
+    renderComparison(d);
+    
+    // Load ZIPs in county
+    await loadZipList(stateAbbr, decodeURIComponent(d.county_name));
+    
+    // Hide ZIP-specific sections
+    detailGrid.classList.add('hidden');
+    document.getElementById('redfinSection').classList.add('hidden');
+    
+  } catch (e) {
+    mainTitle.textContent = 'County Not Found';
+    mainSubtitle.textContent = '';
+  }
+}
+
+// ── Render Aggregate Stats (state/county) ──
+function renderAggregateStats(d) {
+  const cards = [
+    { label: 'Avg Homeownership', value: fmt.pct(d.avg_homeownership) },
+    { label: 'Avg Home Price', value: fmt.currency(Math.round(d.avg_home_price)) },
+    { label: 'Avg Rent', value: fmt.currency(Math.round(d.avg_rent)) },
+    { label: 'Avg Income', value: fmt.currency(Math.round(d.avg_income)) },
+  ];
+  
+  statsGrid.innerHTML = cards.map(c => `
+    <div class="stat-card">
+      <div class="stat-label">${c.label}</div>
+      <div class="stat-value">${c.value}</div>
+    </div>
+  `).join('');
+}
+
+// ── Render ZIP Stats Cards ──
+function renderZipStats(d) {
   const cards = [
     { label: 'Homeownership Rate', value: fmt.pct(d.homeownership_rate), compare: d.comparison ? `Nat'l avg: ${d.comparison.national_avg_homeownership}%` : null },
     { label: 'Median Home Price', value: fmt.currency(d.median_home_price), compare: d.comparison ? `Nat'l avg: ${fmt.currency(d.comparison.national_avg_home_price)}` : null },
@@ -136,7 +250,6 @@ function renderStats(d) {
     </div>
   `).join('');
   
-  // Detail row
   const setCard = (id, val) => {
     const el = document.querySelector(`#${id} .stat-value`);
     if (el) el.textContent = val;
@@ -155,11 +268,17 @@ function renderComparison(d) {
   if (!d.comparison) return;
   
   const comp = d.comparison;
+  const isAggregate = currentView !== 'zip';
+  const homeVal = isAggregate ? parseFloat(d.avg_homeownership) : parseFloat(d.homeownership_rate);
+  const priceVal = isAggregate ? Number(d.avg_home_price) : Number(d.median_home_price);
+  const rentVal = isAggregate ? Number(d.avg_rent) : Number(d.median_rent);
+  const incomeVal = isAggregate ? Number(d.avg_income) : Number(d.median_household_income);
+  
   const bars = [
-    { label: 'Homeownership', zip: parseFloat(d.homeownership_rate), natl: parseFloat(comp.national_avg_homeownership), unit: '%', max: 100 },
-    { label: 'Home Price', zip: Number(d.median_home_price), natl: Number(comp.national_avg_home_price), unit: '$', max: Math.max(Number(d.median_home_price), Number(comp.national_avg_home_price)) * 1.2 },
-    { label: 'Rent', zip: Number(d.median_rent), natl: Number(comp.national_avg_rent), unit: '$', max: Math.max(Number(d.median_rent), Number(comp.national_avg_rent)) * 1.2 },
-    { label: 'Income', zip: Number(d.median_household_income), natl: Number(comp.national_avg_income), unit: '$', max: Math.max(Number(d.median_household_income), Number(comp.national_avg_income)) * 1.2 },
+    { label: 'Homeownership', zip: homeVal, natl: parseFloat(comp.national_avg_homeownership), unit: '%', max: 100 },
+    { label: 'Home Price', zip: priceVal, natl: Number(comp.national_avg_home_price), unit: '$', max: Math.max(priceVal, Number(comp.national_avg_home_price)) * 1.2 },
+    { label: 'Rent', zip: rentVal, natl: Number(comp.national_avg_rent), unit: '$', max: Math.max(rentVal, Number(comp.national_avg_rent)) * 1.2 },
+    { label: 'Income', zip: incomeVal, natl: Number(comp.national_avg_income), unit: '$', max: Math.max(incomeVal, Number(comp.national_avg_income)) * 1.2 },
   ];
   
   const section = document.getElementById('comparisonSection');
@@ -168,7 +287,7 @@ function renderComparison(d) {
   barsDiv.innerHTML = bars.map(b => {
     const zipPct = Math.min((b.zip / b.max) * 100, 100);
     const natlPct = Math.min((b.natl / b.max) * 100, 100);
-    const fmtVal = b.unit === '$' ? fmt.currency(b.zip) : fmt.pct(b.zip);
+    const fmtVal = b.unit === '$' ? fmt.currency(Math.round(b.zip)) : fmt.pct(b.zip);
     
     return `
       <div class="comparison-bar">
@@ -209,11 +328,147 @@ function renderRedfin(d) {
   section.classList.remove('hidden');
 }
 
+// ── State/County Browse ──
+
+// Load state list on init
+async function loadStateList() {
+  try {
+    const data = await fetchAPI('/api/v1/research/list/states');
+    stateSelect.innerHTML = '<option value="">Select a state...</option>' +
+      data.data.map(s => `<option value="${s.state_abbr}">${STATE_NAMES[s.state_abbr] || s.state_abbr} (${s.zip_count} ZIPs)</option>`).join('');
+  } catch (e) {
+    console.error('Failed to load states:', e);
+  }
+}
+
+stateSelect.addEventListener('change', async () => {
+  const state = stateSelect.value;
+  countySelect.classList.add('hidden');
+  browseZips.classList.add('hidden');
+  
+  if (!state) return;
+  await loadState(state);
+});
+
+async function loadCountyList(stateAbbr) {
+  try {
+    const data = await fetchAPI(`/api/v1/research/list/counties?state=${stateAbbr}`);
+    
+    countySelect.innerHTML = '<option value="">Select a county...</option>' +
+      data.data.map(c => `<option value="${c.county_name}">${c.county_name} (${c.zip_count} ZIPs)</option>`).join('');
+    countySelect.classList.remove('hidden');
+    browseZips.classList.add('hidden');
+    
+    // Also render county cards in the main area
+    renderCountyGrid(data.data, stateAbbr);
+    
+  } catch (e) {
+    console.error('Failed to load counties:', e);
+  }
+}
+
+countySelect.addEventListener('change', async () => {
+  const county = countySelect.value;
+  if (!county) return;
+  const state = stateSelect.value;
+  await loadCounty(encodeURIComponent(county), state);
+});
+
+function renderCountyGrid(counties, stateAbbr) {
+  // Show county cards in a section below stats
+  let section = document.getElementById('countySection');
+  if (!section) {
+    section = document.createElement('div');
+    section.id = 'countySection';
+    section.className = 'section';
+    // Insert after statsGrid
+    statsGrid.parentNode.insertBefore(section, statsGrid.nextSibling);
+  }
+  
+  section.innerHTML = `
+    <h3 class="section-title">📍 Counties in ${STATE_NAMES[stateAbbr] || stateAbbr} (${counties.length})</h3>
+    <div class="table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>County</th>
+            <th>ZIPs</th>
+            <th>Population</th>
+            <th>Avg Home Price</th>
+            <th>Homeownership</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${counties.map(c => `
+            <tr style="cursor:pointer" onclick="loadCounty('${encodeURIComponent(c.county_name)}', '${stateAbbr}')">
+              <td><strong>${c.county_name}</strong></td>
+              <td class="mono">${c.zip_count}</td>
+              <td class="mono">${fmt.compact(c.total_population)}</td>
+              <td class="mono">${fmt.currency(Math.round(c.avg_home_price))}</td>
+              <td class="mono">${fmt.pct(c.avg_homeownership)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  section.classList.remove('hidden');
+}
+
+async function loadZipList(stateAbbr, countyName) {
+  try {
+    const data = await fetchAPI(`/api/v1/research/list/zips?state=${stateAbbr}&county=${encodeURIComponent(countyName)}`);
+    
+    // Show ZIP list in a section
+    let section = document.getElementById('countySection');
+    if (!section) {
+      section = document.createElement('div');
+      section.id = 'countySection';
+      section.className = 'section';
+      statsGrid.parentNode.insertBefore(section, statsGrid.nextSibling);
+    }
+    
+    section.innerHTML = `
+      <h3 class="section-title">📍 ZIP Codes in ${countyName}, ${stateAbbr} (${data.data.length})</h3>
+      <div class="table-wrap">
+        <table class="compare-table">
+          <thead>
+            <tr>
+              <th>ZIP</th>
+              <th>Population</th>
+              <th>Home Price</th>
+              <th>Rent</th>
+              <th>Homeownership</th>
+              <th>Income</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.data.map(z => `
+              <tr style="cursor:pointer" onclick="loadZip('${z.zip_code}')">
+                <td><strong>${z.zip_code}</strong></td>
+                <td class="mono">${fmt.compact(z.population)}</td>
+                <td class="mono">${fmt.currency(z.median_home_price)}</td>
+                <td class="mono">${fmt.currency(z.median_rent)}</td>
+                <td class="mono">${fmt.pct(z.homeownership_rate)}</td>
+                <td class="mono">${fmt.currency(z.median_household_income)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+    section.classList.remove('hidden');
+    
+  } catch (e) {
+    console.error('Failed to load ZIP list:', e);
+  }
+}
+
 // ── Compare ──
 addCompareBtn.addEventListener('click', () => {
   if (!currentData) return;
   const zip = currentData.zip_code;
-  if (compareZips.includes(zip)) return;
+  if (!zip || compareZips.includes(zip)) return;
   if (compareZips.length >= 10) return;
   
   compareZips.push(zip);
@@ -256,7 +511,6 @@ function renderCompareTable(rows) {
   const section = document.getElementById('compareSection');
   const table = document.getElementById('compareTable');
   
-  // Deduplicate by zip_code (take first occurrence)
   const seen = new Set();
   rows = rows.filter(r => {
     if (seen.has(r.zip_code)) return false;
@@ -292,9 +546,11 @@ function renderCompareTable(rows) {
 
 // ── Export CSV ──
 exportCsvBtn.addEventListener('click', async () => {
-  if (!currentData) return;
-  const zip = currentData.zip_code;
-  window.open(API_BASE + `/api/v1/research/export/csv?zip_codes=${zip}`, '_blank');
+  if (currentView === 'state' && stateSelect.value) {
+    window.open(API_BASE + `/api/v1/research/export/csv?state=${stateSelect.value}`, '_blank');
+  } else if (currentData && currentData.zip_code) {
+    window.open(API_BASE + `/api/v1/research/export/csv?zip_codes=${currentData.zip_code}`, '_blank');
+  }
 });
 
 // ── Data Quality ──
@@ -330,7 +586,6 @@ qualityBtn.addEventListener('click', async () => {
   }
 });
 
-// Close modal on backdrop click
 document.getElementById('qualityModal').addEventListener('click', (e) => {
   if (e.target.classList.contains('modal')) e.target.classList.add('hidden');
 });
@@ -342,5 +597,5 @@ function debounce(fn, ms) {
 }
 
 // ── Init ──
-// Load Austin by default
+loadStateList();
 loadZip('78701');

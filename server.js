@@ -169,14 +169,17 @@ app.get('/api/v1/research/search', async (req, res) => {
                FROM housing_stats WHERE zip_code LIKE $1 ORDER BY zip_code, population DESC NULLS LAST LIMIT $2`;
       params = [q + '%', limit];
     } else {
-      // Text: search by county, state, or metro area
+      // Text: search by county, state abbr, or metro area
       const pattern = '%' + q + '%';
+      // Also check if query is a 2-letter state abbreviation
+      const isStateAbbr = /^[A-Za-z]{2}$/.test(q);
       query = `SELECT DISTINCT ON (zip_code) zip_code, county_name, state_abbr, metro_area, population,
                homeownership_rate, median_home_price, median_rent, median_household_income
                FROM housing_stats 
-               WHERE county_name ILIKE $1 OR state_name ILIKE $1 OR metro_area ILIKE $1 OR zip_code LIKE $2
+               WHERE county_name ILIKE $1 OR metro_area ILIKE $1 OR zip_code LIKE $2
+               ${isStateAbbr ? 'OR state_abbr = $4' : ''}
                ORDER BY zip_code, population DESC NULLS LAST LIMIT $3`;
-      params = [pattern, q + '%', limit];
+      params = isStateAbbr ? [pattern, q + '%', limit, q.toUpperCase()] : [pattern, q + '%', limit];
     }
     
     const result = await pool.query(query, params);
@@ -310,6 +313,133 @@ app.get('/api/v1/research/summary', async (req, res) => {
       WHERE homeownership_rate IS NOT NULL
     `);
     res.json(ok(result.rows[0], { query_time_ms: Date.now() - start }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json(err('Database error'));
+  }
+});
+
+// 8. GET /api/v1/research/list/states — All states with ZIP counts
+app.get('/api/v1/research/list/states', async (req, res) => {
+  const start = Date.now();
+  try {
+    const result = await pool.query(`
+      SELECT state_abbr, COUNT(*) as zip_count, 
+             SUM(population) as total_population,
+             AVG(median_home_price) as avg_home_price,
+             AVG(homeownership_rate) as avg_homeownership
+      FROM housing_stats 
+      WHERE state_abbr IS NOT NULL
+      GROUP BY state_abbr 
+      ORDER BY state_abbr
+    `);
+    res.json(ok(result.rows, { query_time_ms: Date.now() - start, count: result.rows.length }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json(err('Database error'));
+  }
+});
+
+// 9. GET /api/v1/research/list/counties?state=XX — Counties within a state
+app.get('/api/v1/research/list/counties', async (req, res) => {
+  const { state } = req.query;
+  if (!state || !/^[A-Z]{2}$/i.test(state)) return res.status(400).json(err('Provide valid state abbreviation'));
+  
+  const start = Date.now();
+  try {
+    const result = await pool.query(`
+      SELECT county_name, COUNT(*) as zip_count,
+             SUM(population) as total_population,
+             AVG(median_home_price) as avg_home_price,
+             AVG(homeownership_rate) as avg_homeownership,
+             AVG(median_rent) as avg_rent,
+             AVG(median_household_income) as avg_income
+      FROM housing_stats 
+      WHERE state_abbr = $1 AND county_name IS NOT NULL
+      GROUP BY county_name 
+      ORDER BY county_name
+    `, [state.toUpperCase()]);
+    res.json(ok(result.rows, { query_time_ms: Date.now() - start, count: result.rows.length, state: state.toUpperCase() }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json(err('Database error'));
+  }
+});
+
+// 10. GET /api/v1/research/stats/county/:countyName?state=XX — County aggregate stats
+app.get('/api/v1/research/stats/county/:countyName', async (req, res) => {
+  const { countyName } = req.params;
+  const { state } = req.query;
+  if (!state || !/^[A-Z]{2}$/i.test(state)) return res.status(400).json(err('Provide valid state abbreviation'));
+  
+  const start = Date.now();
+  try {
+    const result = await pool.query(`
+      SELECT 
+        county_name, state_abbr, metro_area,
+        COUNT(*) as zip_count,
+        SUM(population) as total_population,
+        AVG(homeownership_rate) as avg_homeownership,
+        AVG(median_home_price) as avg_home_price,
+        AVG(median_rent) as avg_rent,
+        AVG(median_household_income) as avg_income,
+        AVG(median_age) as avg_age,
+        AVG(vacancy_rate) as avg_vacancy,
+        SUM(total_housing_units) as total_units,
+        SUM(owner_occupied_units) as total_owner_units,
+        SUM(renter_occupied_units) as total_renter_units
+      FROM housing_stats 
+      WHERE county_name ILIKE $1 AND state_abbr = $2
+      GROUP BY county_name, state_abbr, metro_area
+    `, [decodeURIComponent(countyName), state.toUpperCase()]);
+    
+    if (result.rows.length === 0) return res.status(404).json(err('County not found'));
+    
+    // Get national averages for comparison
+    const natl = await pool.query(`
+      SELECT AVG(homeownership_rate) as avg_homeownership, AVG(median_home_price) as avg_home_price,
+             AVG(median_rent) as avg_rent, AVG(median_household_income) as avg_income
+      FROM housing_stats WHERE homeownership_rate IS NOT NULL
+    `);
+    
+    res.json(ok({
+      ...result.rows[0],
+      comparison: {
+        national_avg_homeownership: parseFloat(natl.rows[0].avg_homeownership).toFixed(2),
+        national_avg_home_price: Math.round(parseFloat(natl.rows[0].avg_home_price)),
+        national_avg_rent: Math.round(parseFloat(natl.rows[0].avg_rent)),
+        national_avg_income: Math.round(parseFloat(natl.rows[0].avg_income)),
+      }
+    }, { query_time_ms: Date.now() - start }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json(err('Database error'));
+  }
+});
+
+// 11. GET /api/v1/research/list/zips?state=XX&county=YY — ZIPs within a county/state
+app.get('/api/v1/research/list/zips', async (req, res) => {
+  const { state, county } = req.query;
+  if (!state || !/^[A-Z]{2}$/i.test(state)) return res.status(400).json(err('Provide valid state abbreviation'));
+  
+  const start = Date.now();
+  try {
+    let query, params;
+    if (county) {
+      query = `SELECT zip_code, county_name, state_abbr, metro_area, population,
+               homeownership_rate, median_home_price, median_rent, median_household_income
+               FROM housing_stats WHERE state_abbr = $1 AND county_name ILIKE $2
+               ORDER BY population DESC NULLS LAST`;
+      params = [state.toUpperCase(), county];
+    } else {
+      query = `SELECT zip_code, county_name, state_abbr, metro_area, population,
+               homeownership_rate, median_home_price, median_rent, median_household_income
+               FROM housing_stats WHERE state_abbr = $1
+               ORDER BY population DESC NULLS LAST LIMIT 200`;
+      params = [state.toUpperCase()];
+    }
+    const result = await pool.query(query, params);
+    res.json(ok(result.rows, { query_time_ms: Date.now() - start, count: result.rows.length }));
   } catch (e) {
     console.error(e);
     res.status(500).json(err('Database error'));
