@@ -66,7 +66,7 @@ body {
   font-size: 0.95rem; outline: none; transition: border-color 0.2s;
 }
 .search-box input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-100); }
-.search-btn { padding: 10px 16px; background: var(--blue); color: white; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; font-size: 0.85rem; }
+.search-btn { padding: 10px 16px; background: var(--blue); color: white; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; font-size: 0.85rem; flex-shrink: 0; white-space: nowrap; }
 .search-btn:hover { background: var(--blue-600); }
 
 .search-results {
