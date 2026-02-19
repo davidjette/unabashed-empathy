@@ -407,7 +407,7 @@ app.get('/api/v1/research/list/states', async (req, res) => {
   const start = Date.now();
   try {
     const result = await pool.query(`
-      SELECT state_abbr, COUNT(*) as zip_count, 
+      SELECT state_abbr, MAX(state_name) as state_name, COUNT(*) as zip_count, 
              SUM(population) as total_population,
              AVG(median_home_price) as avg_home_price,
              AVG(homeownership_rate) as avg_homeownership
